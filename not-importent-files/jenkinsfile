@@ -1,0 +1,21 @@
+pipeline {
+    agent any
+    stages {
+        stage('Clone') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/NithinGowda46/Docker_2.notes_app_project.git'
+            }
+        }
+        stage('Build and run') {
+            steps {
+                    sh '/usr/local/bin/docker compose up --build -d '
+            }
+        }
+        stage('upload image') {
+            steps {
+                sh '/usr/local/bin/docker push nithingowda46/notes-app:latest'
+            }
+        }
+    }
+}

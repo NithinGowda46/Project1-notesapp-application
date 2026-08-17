@@ -1,4 +1,4 @@
-Project1 – Notes App CI/CD
+### Project1 – Notes App CI/CD
 
 A full-stack Notes Application built with React, Django, and MySQL, containerized using Docker and deployed to Kubernetes using a Jenkins + Docker Hub + GitOps + Argo CD CI/CD pipeline.
 
@@ -12,8 +12,9 @@ Application Stack
 
 Component	Technology
 Frontend	React
-Backend	Django
+Backend	Django + Gunicorn
 Database	MySQL
+WSGI Server	Gunicorn
 Containerization	Docker
 Container Registry	Docker Hub
 CI/CD	Jenkins
@@ -90,20 +91,47 @@ The React frontend and Django backend are built as separate Docker images.
 
 MySQL is deployed separately in Kubernetes and is not included inside the Django or React Docker images.
 
+Django runs using Gunicorn as the production WSGI server instead of Django’s development runserver.
+
 ⸻
 
 4. Docker Configuration
 
 4.1 Django Dockerfile
 
-The Django backend uses the following Dockerfile:
+The Django backend uses Gunicorn to serve the Django application through WSGI.
 
 FROM python:latest
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+EXPOSE 8000
+CMD ["gunicorn", "<django_project>.wsgi:application", "--bind", "0.0.0.0:8000"]
+
+Important
+
+Replace:
+
+<django_project>
+
+with the Django project package that contains:
+
+wsgi.py
+
+For example, if your structure is:
+
+project/
+├── manage.py
+├── notes/
+│   ├── settings.py
+│   ├── urls.py
+│   ├── wsgi.py
+│   └── __init__.py
+
+then the command becomes:
+
+CMD ["gunicorn", "notes.wsgi:application", "--bind", "0.0.0.0:8000"]
 
 Django container
 
@@ -111,11 +139,33 @@ Django container
 * Working directory: /app
 * Application port: 8000
 * Dependencies are installed from requirements.txt
-* Django starts using runserver
+* Gunicorn is used as the WSGI server
+* Django is served through wsgi.py
+* Django runserver is not used
 
 ⸻
 
-4.2 React Dockerfile
+4.2 Django Requirements
+
+Make sure requirements.txt contains Gunicorn.
+
+Example:
+
+Django
+gunicorn
+mysqlclient
+
+If your project already contains other dependencies, keep them as well.
+
+The important requirement is:
+
+gunicorn
+
+Jenkins does not need a separate Gunicorn installation because Gunicorn is installed inside the Docker image through requirements.txt.
+
+⸻
+
+4.3 React Dockerfile
 
 The React frontend uses:
 
@@ -124,7 +174,7 @@ WORKDIR /app/
 COPY . /app/
 RUN npm install
 EXPOSE 3000
-CMD ["npm","start"]
+CMD ["npm", "start"]
 
 React container
 
@@ -133,6 +183,8 @@ React container
 * Application port: 3000
 * Dependencies are installed using npm install
 * React starts using npm start
+
+For a production deployment, React should ideally be built into static assets and served using Nginx or another production web server.
 
 ⸻
 
@@ -214,6 +266,14 @@ File	Purpose
 9.hpa.yml	Configures Horizontal Pod Autoscaling
 10.vpa.yml	Configures Vertical Pod Autoscaling
 
+The Django Kubernetes Deployment continues to expose port 8000.
+
+Gunicorn listens on:
+
+0.0.0.0:8000
+
+Therefore, the existing Django Service and Ingress configuration can continue to use port 8000, provided the current YAML is already configured for that port.
+
 ⸻
 
 9. Namespace and Secrets
@@ -265,6 +325,16 @@ Ingress
 HPA
    ↓
 VPA
+
+Django pods run the application using:
+
+Gunicorn
+   ↓
+Django WSGI
+
+instead of:
+
+Django runserver
 
 ⸻
 
@@ -347,7 +417,9 @@ Apply the AppProject
 
 kubectl apply -f argocd/project.yml
 
-project-2 under spec.project refers to the Argo CD AppProject. The Kubernetes namespace project-2 is a separate Kubernetes resource, even though they use the same name in this project.
+project-2 under spec.project refers to the Argo CD AppProject.
+
+The Kubernetes namespace project-2 is a separate Kubernetes resource, even though they use the same name in this project.
 
 ⸻
 
@@ -413,95 +485,17 @@ Jenkins is responsible for:
 11. Pushing the changes to GitHub.
 12. Argo CD detects the Git change and deploys the new version.
 
-⸻
-
-15. Jenkins Credentials
-
-Jenkins needs Docker Hub credentials to authenticate and push the Django and React Docker images.
-
-15.1 Create Docker Hub Credential in Jenkins
-
-1. Open the Jenkins dashboard.
-2. Go to:
-
-Manage Jenkins
-    ↓
-Credentials
-    ↓
-System
-    ↓
-Global credentials (unrestricted)
-
-3. Click:
-
-Add Credentials
-
-4. Select:
-
-Kind: Username with password
-
-5. Enter your Docker Hub username.
-
-Example:
-
-Username:
-nithingowda46
-
-6. For the password field, use a Docker Hub Access Token instead of your Docker Hub account password.
-7. Set the credential ID to:
-
-dockerid
-
-8. Add an optional description:
-
-Docker Hub credentials for Notes App CI/CD
-
-9. Click Create.
-
-Final Credential Configuration
-
-Kind:
-Username with password
-Username:
-nithingowda46
-Password:
-Docker Hub Access Token
-ID:
-dockerid
-
-The Jenkinsfile references this credential using:
-
-withCredentials([
-    usernamePassword(
-        credentialsId: 'dockerid',
-        usernameVariable: 'DOCKER_USER',
-        passwordVariable: 'DOCKER_PASS'
-    )
-])
-
-Jenkins then uses the stored credentials to log in to Docker Hub:
-
-echo "$DOCKER_PASS" | docker login \
--u "$DOCKER_USER" \
---password-stdin
-
-The Docker password/token is therefore not written directly into the Jenkinsfile.
-
-Security: Never write your Docker Hub password or access token directly inside the Jenkinsfile or commit it to GitHub.
-
-Jenkins also needs permission to push changes to the GitOps repository.
+Gunicorn does not require any additional Jenkins stage because it is installed and executed inside the Django Docker image.
 
 ⸻
 
-16. Jenkinsfile
+15. Jenkinsfile
 
 The Jenkins pipeline is:
 
 pipeline {
     agent any
     stages {
-        // Configure the Git username and email that Jenkins will use
-        // when it creates commits in the GitOps repository.
         stage('Git Config') {
             steps {
                 sh '''
@@ -510,17 +504,12 @@ pipeline {
                 '''
             }
         }
-        // Clone the application source-code repository.
-        // This repository contains the Django and React application
-        // along with their Dockerfiles.
         stage('Clone Application') {
             steps {
                 git branch: 'main',
                     url: 'https://github.com/NithinGowda46/Project1-notesapp-application.git'
             }
         }
-        // Login to Docker Hub using credentials stored securely
-        // inside Jenkins Credentials Manager.
         stage('Docker Login') {
             steps {
                 withCredentials([
@@ -538,8 +527,6 @@ pipeline {
                 }
             }
         }
-        // Build the Docker image for the Django backend.
-        // BUILD_NUMBER provides a unique image tag for every Jenkins build.
         stage('Build Django Image') {
             steps {
                 sh '''
@@ -548,7 +535,6 @@ pipeline {
                 '''
             }
         }
-        // Push the Django backend image to Docker Hub.
         stage('Push Django Image') {
             steps {
                 sh '''
@@ -557,8 +543,6 @@ pipeline {
                 '''
             }
         }
-        // Build the Docker image for the React frontend.
-        // The React application is located inside the mynotes directory.
         stage('Build React Image') {
             steps {
                 sh '''
@@ -567,7 +551,6 @@ pipeline {
                 '''
             }
         }
-        // Push the React frontend image to Docker Hub.
         stage('Push React Image') {
             steps {
                 sh '''
@@ -576,8 +559,6 @@ pipeline {
                 '''
             }
         }
-        // Clone the GitOps repository.
-        // This repository contains all Kubernetes manifests used by Argo CD.
         stage('Clone GitOps Repo') {
             steps {
                 dir('gitops') {
@@ -586,16 +567,6 @@ pipeline {
                 }
             }
         }
-        // Update the Django deployment YAML with the new Docker image tag.
-        //
-        // IMPORTANT:
-        // This sed syntax is for Linux Jenkins servers.
-        //
-        // macOS uses:
-        // sed -i "" "..."
-        //
-        // Linux uses:
-        // sed -i "..."
         stage('Update Django Image') {
             steps {
                 dir('gitops') {
@@ -607,9 +578,6 @@ pipeline {
                 }
             }
         }
-        // Update the React deployment YAML with the new Docker image tag.
-        //
-        // This also uses the Linux-compatible sed -i syntax.
         stage('Update React Image') {
             steps {
                 dir('gitops') {
@@ -621,8 +589,6 @@ pipeline {
                 }
             }
         }
-        // Commit the updated Docker image versions to the GitOps repository.
-        // If there are no changes, the pipeline will continue instead of failing.
         stage('Git Commit') {
             steps {
                 dir('gitops') {
@@ -637,10 +603,6 @@ pipeline {
                 }
             }
         }
-        // Push the updated Kubernetes manifests to the GitOps repository.
-        //
-        // After this push, Argo CD detects the Git repository change
-        // and synchronizes the new image versions with the Kubernetes cluster.
         stage('Git Push') {
             steps {
                 dir('gitops') {
@@ -653,11 +615,13 @@ pipeline {
     }
 }
 
-Important: The sed -i commands in this Jenkinsfile use Linux syntax. The comments show the macOS equivalent (sed -i "") for reference.
+Important: The sed -i commands use Linux syntax. This Jenkinsfile is therefore intended for a Linux Jenkins agent/server. On macOS, the sed syntax would use sed -i "".
+
+No Jenkinsfile change is required specifically for Gunicorn.
 
 ⸻
 
-17. Docker Image Versioning
+16. Docker Image Versioning
 
 Jenkins uses the Jenkins BUILD_NUMBER to create unique Docker image tags.
 
@@ -680,9 +644,7 @@ This avoids relying on the latest tag and allows each Jenkins build to have a tr
 
 ⸻
 
-18. Complete CI/CD Flow
-
-The complete pipeline works as follows:
+17. Complete CI/CD Flow
 
                     Developer
                         │
@@ -735,10 +697,16 @@ The complete pipeline works as follows:
           ┌────────────┼────────────┐
           ▼            ▼            ▼
        React         Django        MySQL
+                     │
+                     ▼
+                  Gunicorn
+                     │
+                     ▼
+                  Django WSGI
 
 ⸻
 
-19. GitOps Deployment Flow
+18. GitOps Deployment Flow
 
 Argo CD follows the GitOps model.
 
@@ -771,7 +739,7 @@ Argo CD can automatically synchronize the desired state stored in Git with the K
 
 ⸻
 
-20. Verify Kubernetes Deployment
+19. Verify Kubernetes Deployment
 
 Check the Namespace
 
@@ -803,17 +771,17 @@ kubectl get vpa -n project-2
 
 ⸻
 
-21. Verify Argo CD
+20. Verify Argo CD
 
-Check the Argo CD Application
+Check the Argo CD Application:
 
 kubectl get applications -n argocd
 
-Check the AppProject
+Check the AppProject:
 
 kubectl get appproject -n argocd
 
-Describe the Application
+Describe the Application:
 
 kubectl describe application notesapp -n argocd
 
@@ -821,7 +789,7 @@ The Argo CD Application should eventually show the desired Git revision as synch
 
 ⸻
 
-22. Important Configuration Requirements
+21. Important Configuration Requirements
 
 Before running the Jenkins pipeline, make sure the Jenkins agent has:
 
@@ -849,9 +817,15 @@ main
 Path:
 k8s
 
+The Django Docker image must also have:
+
+gunicorn
+
+available through requirements.txt.
+
 ⸻
 
-23. Security Notes
+22. Security Notes
 
 Do not commit sensitive information such as:
 
@@ -870,14 +844,16 @@ Jenkins credentials should be stored using Jenkins Credentials Manager.
 
 ⸻
 
-24. Production Considerations
+23. Production Considerations
 
 This project is designed as a DevOps learning/portfolio project.
 
 For a production deployment, consider:
 
 * Use a fixed Python base image instead of python:latest.
-* Use a production WSGI server such as Gunicorn instead of Django runserver.
+* Use Gunicorn instead of Django runserver.
+* Configure Gunicorn workers appropriately for the workload.
+* Add a proper health check/readiness probe for the Django application.
 * Build React as production static assets and serve them through Nginx or another production web server.
 * Use managed MySQL such as Amazon RDS instead of running the database directly inside Kubernetes when appropriate.
 * Use Kubernetes Secrets integrated with a proper secret-management solution.
@@ -889,10 +865,13 @@ For a production deployment, consider:
 * Configure monitoring and logging.
 * Use TLS/HTTPS for the application.
 * Use a production-grade Kubernetes cluster instead of a local development cluster.
+* Use resource requests and limits for Kubernetes workloads.
+* Configure persistent storage appropriately for MySQL.
+* Configure database backups and disaster recovery.
 
 ⸻
 
-25. Final Architecture
+24. Final Architecture
 
                    ┌───────────────────────┐
                    │       Developer       │
@@ -943,6 +922,7 @@ For a production deployment, consider:
                   │                  │
                   │ React            │
                   │ Django           │
+                  │ Gunicorn         │
                   │ MySQL            │
                   │ Ingress          │
                   │ HPA              │
@@ -951,7 +931,7 @@ For a production deployment, consider:
 
 ⸻
 
-26. Summary
+25. Summary
 
 This project implements a complete CI/CD and GitOps workflow:
 
@@ -969,9 +949,17 @@ Argo CD
   ↓
 Kubernetes
   ↓
-React + Django + MySQL
+React + Django + Gunicorn + MySQL
 
-The application source code and Kubernetes deployment configuration are maintained in separate repositories. Docker images are versioned using Jenkins build numbers, and Argo CD automatically synchronizes Kubernetes with the desired state stored in Git.
+The application source code and Kubernetes deployment configuration are maintained in separate repositories.
+
+Docker images are versioned using Jenkins build numbers.
+
+Jenkins builds and pushes the Django and React images, then updates the corresponding Kubernetes image tags in the GitOps repository.
+
+Argo CD detects the Git change and automatically synchronizes Kubernetes with the desired state stored in Git.
+
+The Django application is served using Gunicorn and WSGI instead of Django’s development runserver.
 
 ⸻
 
@@ -979,4 +967,4 @@ The application source code and Kubernetes deployment configuration are maintain
 
 Nithin Gowda
 
-This project demonstrates an end-to-end DevOps workflow using Docker, Jenkins, Kubernetes, GitOps, and Argo CD.
+This project demonstrates an end-to-end DevOps workflow using Docker, Jenkins, Kubernetes, GitOps, Argo CD, Gunicorn, and WSGI.
